@@ -163,6 +163,22 @@ pub struct SubscribeRequestFilterBlocks {
 pub struct SubscribeRequestFilterBlocksMeta {}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SubscribeRequestFilterEntry {}
+/// Filter for deshred transactions (transactions received before execution).
+/// Deshred transactions are received when entries are formed from shreds,
+/// BEFORE any execution occurs. No TransactionStatusMeta is available.
+/// Address lookup tables are resolved, so both static account keys and
+/// dynamically loaded addresses (from ALTs) are available for filtering.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubscribeRequestFilterDeshredTransactions {
+    #[prost(bool, optional, tag = "1")]
+    pub vote: ::core::option::Option<bool>,
+    #[prost(string, repeated, tag = "2")]
+    pub account_include: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "3")]
+    pub account_exclude: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "4")]
+    pub account_required: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SubscribeRequestAccountsDataSlice {
     #[prost(uint64, tag = "1")]
@@ -174,6 +190,22 @@ pub struct SubscribeRequestAccountsDataSlice {
 pub struct SubscribeRequestPing {
     #[prost(int32, tag = "1")]
     pub id: i32,
+}
+/// Request message for the SubscribeDeshred RPC.
+/// Subscribes to deshred transactions (transactions received before execution).
+/// Deshred transactions are received when entries are formed from shreds,
+/// BEFORE any execution occurs. No TransactionStatusMeta is available.
+/// Address lookup tables are resolved, so both static and loaded addresses
+/// are available for filtering.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubscribeDeshredRequest {
+    #[prost(map = "string, message", tag = "1")]
+    pub deshred_transactions: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        SubscribeRequestFilterDeshredTransactions,
+    >,
+    #[prost(message, optional, tag = "2")]
+    pub ping: ::core::option::Option<SubscribeRequestPing>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SubscribeUpdate {
@@ -367,12 +399,59 @@ pub struct SubscribeUpdateEntry {
     #[prost(uint64, tag = "6")]
     pub starting_transaction_index: u64,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubscribeUpdateDeshredTransaction {
+    #[prost(message, optional, tag = "1")]
+    pub transaction: ::core::option::Option<SubscribeUpdateDeshredTransactionInfo>,
+    #[prost(uint64, tag = "2")]
+    pub slot: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubscribeUpdateDeshredTransactionInfo {
+    #[prost(bytes = "vec", tag = "1")]
+    pub signature: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag = "2")]
+    pub is_vote: bool,
+    #[prost(message, optional, tag = "3")]
+    pub transaction: ::core::option::Option<
+        super::solana::storage::confirmed_block::Transaction,
+    >,
+    #[prost(bytes = "vec", repeated, tag = "4")]
+    pub loaded_writable_addresses: ::prost::alloc::vec::Vec<
+        ::prost::alloc::vec::Vec<u8>,
+    >,
+    #[prost(bytes = "vec", repeated, tag = "5")]
+    pub loaded_readonly_addresses: ::prost::alloc::vec::Vec<
+        ::prost::alloc::vec::Vec<u8>,
+    >,
+}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SubscribeUpdatePing {}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SubscribeUpdatePong {
     #[prost(int32, tag = "1")]
     pub id: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubscribeUpdateDeshred {
+    #[prost(string, repeated, tag = "1")]
+    pub filters: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "5")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(oneof = "subscribe_update_deshred::UpdateOneof", tags = "2, 3, 4")]
+    pub update_oneof: ::core::option::Option<subscribe_update_deshred::UpdateOneof>,
+}
+/// Nested message and enum types in `SubscribeUpdateDeshred`.
+pub mod subscribe_update_deshred {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum UpdateOneof {
+        #[prost(message, tag = "2")]
+        DeshredTransaction(super::SubscribeUpdateDeshredTransaction),
+        #[prost(message, tag = "3")]
+        Ping(super::SubscribeUpdatePing),
+        #[prost(message, tag = "4")]
+        Pong(super::SubscribeUpdatePong),
+    }
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SubscribeReplayInfoRequest {}
@@ -626,6 +705,32 @@ pub mod geyser_client {
             let path = http::uri::PathAndQuery::from_static("/geyser.Geyser/Subscribe");
             let mut req = request.into_streaming_request();
             req.extensions_mut().insert(GrpcMethod::new("geyser.Geyser", "Subscribe"));
+            self.inner.streaming(req, path, codec).await
+        }
+        pub async fn subscribe_deshred(
+            &mut self,
+            request: impl tonic::IntoStreamingRequest<
+                Message = super::SubscribeDeshredRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::SubscribeUpdateDeshred>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/geyser.Geyser/SubscribeDeshred",
+            );
+            let mut req = request.into_streaming_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("geyser.Geyser", "SubscribeDeshred"));
             self.inner.streaming(req, path, codec).await
         }
         pub async fn subscribe_replay_info(

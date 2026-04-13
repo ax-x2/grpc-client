@@ -1,10 +1,12 @@
+pub mod benchmark;
 pub mod client;
 pub mod codec;
+pub mod raw;
 pub mod subscriber;
 pub mod types;
 
 #[allow(clippy::all)]
-mod proto {
+pub mod proto {
     pub mod solana {
         pub mod storage {
             pub mod confirmed_block {
@@ -18,5 +20,15 @@ mod proto {
     }
 }
 
+pub use benchmark::{
+    BenchmarkConfig, BenchmarkEndpoint, BenchmarkHandle, BenchmarkSnapshot, EndpointScore,
+    spawn_deshred_benchmark, spawn_subscribe_benchmark,
+};
+pub use client::{
+    DeshredSubscription, GeyserSubscription, GrpcClient, GrpcClientBuilder, GrpcClientBuilderError,
+    GrpcClientError, GrpcSlotClient, ReconnectConfig, RequestBatch, SubscribeDeshredRequestBuilder,
+    SubscribeRequestBuilder, SubscriptionConfig, SubscriptionController, SubscriptionError,
+};
+pub use raw::{RawSlotUpdate, RawSubscribeFrame, RawSubscription};
 pub use subscriber::GrpcSlotSubscriber;
 pub use types::{CommitmentLevel, SlotStatus, SlotTracker, SlotTrackerSnapshot};

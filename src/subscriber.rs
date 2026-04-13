@@ -1,15 +1,18 @@
-use crate::client::GrpcSlotClient;
+use crate::client::{GrpcClient, SubscribeRequestBuilder, SubscriptionConfig};
+use crate::proto::geyser::SubscribeRequestFilterSlots;
 use crate::proto::geyser::CommitmentLevel;
 use crate::types::SlotTracker;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 
 pub struct GrpcSlotSubscriber {
     thread_handle: Option<JoinHandle<()>>,
-    running: Arc<AtomicBool>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    /// owning-thread-only start guard — never shared across threads.
+    running: bool,
     tracker: Arc<SlotTracker>,
     grpc_url: Arc<str>,
     commitment: CommitmentLevel,
@@ -25,7 +28,8 @@ impl GrpcSlotSubscriber {
     ) -> Self {
         Self {
             thread_handle: None,
-            running: Arc::new(AtomicBool::new(false)),
+            shutdown_tx: None,
+            running: false,
             tracker,
             grpc_url: grpc_url.into().into(),
             commitment,
@@ -34,11 +38,14 @@ impl GrpcSlotSubscriber {
     }
 
     pub fn start(&mut self) {
-        if self.running.swap(true, Ordering::AcqRel) {
+        if self.running {
             return;
         }
+        self.running = true;
 
-        let running = Arc::clone(&self.running);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        self.shutdown_tx = Some(shutdown_tx);
+
         let tracker = Arc::clone(&self.tracker);
         let grpc_url = Arc::clone(&self.grpc_url);
         let commitment = self.commitment;
@@ -46,17 +53,20 @@ impl GrpcSlotSubscriber {
 
         self.thread_handle = Some(thread::spawn(move || {
             if let Some(core) = cpu_core {
-                if let Err(e) = cpu::set_cpu_affinity(vec![core]) {
-                    eprintln!("Failed to set CPU affinity: {}", e);
+                if let Err(error) = cpu::set_cpu_affinity(vec![core]) {
+                    eprintln!("failed to set CPU affinity: {error}");
                 }
             }
 
-            run_subscription_loop(running, tracker, grpc_url, commitment);
+            run_subscription_thread(tracker, grpc_url, commitment, shutdown_rx);
         }));
     }
 
     pub fn stop(&mut self) {
-        self.running.store(false, Ordering::Release);
+        self.running = false;
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
@@ -66,15 +76,33 @@ impl GrpcSlotSubscriber {
         self.tracker.is_connected()
     }
 
+    /// adaptive spin-wait with cpu_pause hints and yield fallback, bounded by timeout.
+    /// avoids a fixed 10ms sleep — uses the same strategy as BackoffWait internally.
     pub fn wait_for_connection(&self, timeout: Duration) -> bool {
         let start = std::time::Instant::now();
-        while start.elapsed() < timeout {
+        let mut spins: u32 = 10;
+        const MAX_SPINS: u32 = 1000;
+
+        loop {
             if self.tracker.is_connected() {
                 return true;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            if start.elapsed() >= timeout {
+                return false;
+            }
+
+            if spins < MAX_SPINS {
+                // spin with PAUSE hint — reduces power and SMT contention.
+                for _ in 0..spins {
+                    cpu::cpu_pause();
+                }
+                // exponential backoff toward MAX_SPINS
+                spins = spins.saturating_mul(2).min(MAX_SPINS);
+            } else {
+                // reached max spin budget — yield to the OS scheduler.
+                std::thread::yield_now();
+            }
         }
-        false
     }
 }
 
@@ -84,68 +112,88 @@ impl Drop for GrpcSlotSubscriber {
     }
 }
 
-fn run_subscription_loop(
-    running: Arc<AtomicBool>,
+fn run_subscription_thread(
     tracker: Arc<SlotTracker>,
     grpc_url: Arc<str>,
     commitment: CommitmentLevel,
+    shutdown_rx: oneshot::Receiver<()>,
 ) {
-    let mut backoff = Duration::from_millis(100);
-    const MAX_BACKOFF: Duration = Duration::from_secs(30);
-
-    while running.load(Ordering::Acquire) {
-        tracker.set_connected(false);
-
-        match connect_and_subscribe(&running, &tracker, &grpc_url, commitment) {
-            Ok(()) => {
-                backoff = Duration::from_millis(100);
-            }
-            Err(e) => {
-                eprintln!("gRPC error: {}, reconnecting in {:?}", e, backoff);
-                std::thread::sleep(backoff);
-                backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
-            }
-        }
-    }
-}
-
-fn connect_and_subscribe(
-    running: &Arc<AtomicBool>,
-    tracker: &Arc<SlotTracker>,
-    grpc_url: &str,
-    commitment: CommitmentLevel,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()?;
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracker.set_connected(false);
+            eprintln!("failed to build subscriber runtime: {error}");
+            return;
+        }
+    };
 
-    rt.block_on(async { subscribe_async(running, tracker, grpc_url, commitment).await })
+    runtime.block_on(subscription_task(tracker, grpc_url, commitment, shutdown_rx));
 }
 
-async fn subscribe_async(
-    running: &Arc<AtomicBool>,
-    tracker: &Arc<SlotTracker>,
-    grpc_url: &str,
+async fn subscription_task(
+    tracker: Arc<SlotTracker>,
+    grpc_url: Arc<str>,
     commitment: CommitmentLevel,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = GrpcSlotClient::connect(grpc_url).await?;
-    let mut stream = client.subscribe_slots(commitment).await?;
+    mut shutdown_rx: oneshot::Receiver<()>,
+) {
+    let client = match GrpcClient::builder_from_shared(grpc_url.to_string()) {
+        Ok(builder) => builder.build(),
+        Err(error) => {
+            tracker.set_connected(false);
+            eprintln!("invalid gRPC endpoint: {error}");
+            return;
+        }
+    };
 
-    tracker.set_connected(true);
+    let request = SubscribeRequestBuilder::new()
+        .commitment(commitment)
+        .add_slot_filter(
+            "client",
+            SubscribeRequestFilterSlots {
+                filter_by_commitment: Some(false),
+                interslot_updates: Some(true),
+            },
+        )
+        .build();
 
-    while running.load(Ordering::Acquire) {
-        match stream.next().await {
-            Some(Ok(update)) => {
-                client.process_message(update, tracker);
+    // use RawSubscription: no SubscribeUpdate allocation on the hot path.
+    // reconnect is handled inside SubscriptionCore / RawSubscription.
+    let (_controller, mut stream) = client.subscribe_raw(request, SubscriptionConfig::default());
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                tracker.set_connected(false);
+                break;
             }
-            Some(Err(e)) => {
-                return Err(Box::new(e));
-            }
-            None => {
-                return Err("Stream closed".into());
+            next = stream.next() => {
+                match next {
+                    Some(Ok(frame)) => {
+                        // set_connected(true) only after the first real message arrives
+                        tracker.set_connected(true);
+                        // stack-only parse: no heap allocation, no prost decode
+                        if let Ok(Some(update)) = frame.parse_slot_update() {
+                            tracker.update_raw(update.slot, update.status);
+                        }
+                        // Ok(None) = ping/pong/non-slot — continue silently
+                    }
+                    Some(Err(_e)) => {
+                        // SubscriptionCore handles reconnect internally; errors
+                        // surfaced here are terminal or pre-reconnect notifications.
+                        tracker.set_connected(false);
+                        // dont break: RawSubscription reconnects automatically.
+                    }
+                    None => {
+                        // stream ended (closed by server or terminal error).
+                        tracker.set_connected(false);
+                        break;
+                    }
+                }
             }
         }
     }
-
-    Ok(())
 }

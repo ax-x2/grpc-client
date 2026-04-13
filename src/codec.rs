@@ -15,6 +15,19 @@ pub fn encode_grpc_message<M: Message>(msg: &M) -> io::Result<Bytes> {
     Ok(buf.freeze())
 }
 
+/// encode a gRPC message into a reusable scratch buffer.
+/// avoids per-call allocation: caller owns and reuses `scratch`.
+pub fn encode_grpc_message_into<M: Message>(msg: &M, scratch: &mut BytesMut) -> io::Result<Bytes> {
+    let len = msg.encoded_len();
+    scratch.clear();
+    scratch.reserve(5 + len);
+    scratch.put_u8(0); // not compressed
+    scratch.put_u32(len as u32);
+    msg.encode(scratch)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(scratch.split().freeze())
+}
+
 pub fn decode_grpc_message(data: &[u8]) -> io::Result<&[u8]> {
     if data.len() < 5 {
         return Err(io::Error::new(
@@ -33,14 +46,19 @@ pub fn decode_grpc_message(data: &[u8]) -> io::Result<&[u8]> {
 
     let len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
 
-    if data.len() < 5 + len {
+    // guard against overflow: 5 + len could wrap on 32-bit
+    let end = len
+        .checked_add(5)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "length overflow"))?;
+
+    if data.len() < end {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Incomplete message",
         ));
     }
 
-    Ok(&data[5..5 + len])
+    Ok(&data[5..end])
 }
 
 #[cfg(test)]

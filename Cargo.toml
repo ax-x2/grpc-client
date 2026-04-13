@@ -1,17 +1,20 @@
 [package]
 name = "grpc-client"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
 
 [dependencies]
 cpu = "0.1.0"
 prost = "0.13"
 prost-types = "0.13"
 bytes = "1.5"
-tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros", "rt-multi-thread"] }
-tokio-stream = "0.1"
-tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros", "rt-multi-thread", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost", "tls-native-roots"] }
 futures-core = "0.3"
+pin-project-lite = "0.2"
+thiserror = "1.0"
+bs58 = "0.5"
 
 [build-dependencies]
 tonic-build = "0.12"
