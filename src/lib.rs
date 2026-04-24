@@ -29,6 +29,9 @@ pub use client::{
     GrpcClientError, GrpcSlotClient, ReconnectConfig, RequestBatch, SubscribeDeshredRequestBuilder,
     SubscribeRequestBuilder, SubscriptionConfig, SubscriptionController, SubscriptionError,
 };
-pub use raw::{RawSlotUpdate, RawSubscribeFrame, RawSubscription};
+pub use raw::{
+    AccountKeyIter, BlockView, RawSlotUpdate, RawSubscribeFrame, RawSubscription, TokenBalanceIter,
+    TokenBalanceView, TxIter, TxView, parse_block_update_from_bytes,
+};
 pub use subscriber::GrpcSlotSubscriber;
 pub use types::{CommitmentLevel, SlotStatus, SlotTracker, SlotTrackerSnapshot};
