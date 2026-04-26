@@ -31,7 +31,8 @@ pub use client::{
 };
 pub use raw::{
     AccountKeyIter, BlockView, RawSlotUpdate, RawSubscribeFrame, RawSubscription, TokenBalanceIter,
-    TokenBalanceView, TxIter, TxView, parse_block_update_from_bytes,
+    TokenBalanceView, TxIter, TxView, parse_block_slot, parse_block_update_from_bytes,
+    parse_created_at_ns,
 };
 pub use subscriber::GrpcSlotSubscriber;
 pub use types::{CommitmentLevel, SlotStatus, SlotTracker, SlotTrackerSnapshot};

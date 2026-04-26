@@ -733,6 +733,52 @@ pub fn parse_block_update_from_bytes(mut data: &[u8]) -> Result<Option<BlockView
     Ok(None)
 }
 
+/// peek the block slot from a `SubscribeUpdate` wire payload without
+/// materializing a `BlockView`. returns `None` for non-block variants
+/// (ping/pong/slot/etc) or malformed data. ~2 varint reads per call.
+/// 
+pub fn parse_block_slot(mut data: &[u8]) -> Option<u64> {
+    while !data.is_empty() {
+        let (field_num, wire_type, rest) = read_tag(data)?;
+        data = rest;
+        match field_num {
+            5 => {
+                if wire_type != 2 {
+                    return None;
+                }
+                let (payload, _) = read_len_slice(data)?;
+                // block.slot is field 1 varint — almost always first on the wire.
+                return find_first_varint(payload, 1);
+            }
+            6 | 9 => return None, // ping / pong
+            _ => {
+                data = skip_field(wire_type, data)?;
+            }
+        }
+    }
+    None
+}
+
+/// peek the `SubscribeUpdate.created_at` timestamp (field 11 - a
+/// `google.protobuf.Timestamp` with `int64 seconds = 1` and
+/// `int32 nanos = 2`). returns `(seconds, nanos)` or `None` if the
+/// field is absent or the payload is malformed.
+/// 
+pub fn parse_created_at_ns(mut data: &[u8]) -> Option<(i64, i32)> {
+    while !data.is_empty() {
+        let (field_num, wire_type, rest) = read_tag(data)?;
+        data = rest;
+        if field_num == 11 && wire_type == 2 {
+            let (payload, _) = read_len_slice(data)?;
+            let seconds = find_first_varint(payload, 1).unwrap_or(0) as i64;
+            let nanos = find_first_varint(payload, 2).unwrap_or(0) as i32;
+            return Some((seconds, nanos));
+        }
+        data = skip_field(wire_type, data)?;
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // RawMode — SubscriptionMode impl for the raw Bytes path
 // ---------------------------------------------------------------------------
@@ -1086,6 +1132,63 @@ mod tests {
         let view = parse_block_update_from_bytes(&bytes).unwrap().unwrap();
         assert_eq!(view.slot, 77);
         assert_eq!(view.transactions().count(), 0);
+    }
+
+    #[test]
+    fn parse_block_slot_peek() {
+        use crate::proto::geyser::SubscribeUpdateBlock;
+        let block = SubscribeUpdateBlock {
+            slot: 424242,
+            blockhash: "h".to_owned(),
+            ..SubscribeUpdateBlock::default()
+        };
+        let update = SubscribeUpdate {
+            filters: vec![],
+            created_at: None,
+            update_oneof: Some(UpdateOneof::Block(block)),
+        };
+        let bytes = encode_subscribe_update(&update);
+        assert_eq!(parse_block_slot(&bytes), Some(424242));
+
+        // non-block variant returns None
+        let ping = SubscribeUpdate {
+            filters: vec![],
+            created_at: None,
+            update_oneof: Some(UpdateOneof::Ping(SubscribeUpdatePing {})),
+        };
+        let ping_bytes = encode_subscribe_update(&ping);
+        assert_eq!(parse_block_slot(&ping_bytes), None);
+    }
+
+    #[test]
+    fn parse_created_at_extracts_timestamp() {
+        use crate::proto::geyser::SubscribeUpdateBlock;
+        use prost_types::Timestamp;
+        let block = SubscribeUpdateBlock {
+            slot: 1,
+            ..SubscribeUpdateBlock::default()
+        };
+        let update = SubscribeUpdate {
+            filters: vec![],
+            created_at: Some(Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 123_456_789,
+            }),
+            update_oneof: Some(UpdateOneof::Block(block)),
+        };
+        let bytes = encode_subscribe_update(&update);
+        let (sec, nanos) = parse_created_at_ns(&bytes).unwrap();
+        assert_eq!(sec, 1_700_000_000);
+        assert_eq!(nanos, 123_456_789);
+
+        // missing created_at returns None
+        let without = SubscribeUpdate {
+            filters: vec![],
+            created_at: None,
+            update_oneof: Some(UpdateOneof::Ping(SubscribeUpdatePing {})),
+        };
+        let without_bytes = encode_subscribe_update(&without);
+        assert!(parse_created_at_ns(&without_bytes).is_none());
     }
 
     #[test]
